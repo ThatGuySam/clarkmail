@@ -1,6 +1,7 @@
 #:schema node_modules/wrangler/config-schema.json
 name = "clawpost"
 main = "src/index.ts"
+account_id = "8d4ef8fe891f53e5658d3fdd5a4c7630"
 compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
@@ -10,7 +11,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "clawpost-db"
-database_id = "your-database-id"
+database_id = "a0a14e3e-e1bf-43ab-9451-c674193ad844"
 migrations_dir = "migrations"
 
 # --- R2 Bucket ---
@@ -41,8 +42,13 @@ name = "EMAIL"
 
 # --- Environment Variables ---
 [vars]
-FROM_EMAIL = "noreply@yourdomain.com"
-FROM_NAME = "Clawpost"
+FROM_EMAIL = "clark@samcarlton.com"
+FROM_NAME = "Clark"
+INBOUND_ALLOWED_RECIPIENTS = "clark@samcarlton.com,clark@sam.lc"
+INBOUND_AUTO_APPROVE_ALL = "true"
+INBOUND_REQUIRE_AUTH_PASS = "true"
+MAX_INBOUND_BYTES = "10485760"      # 10 MiB
+MAX_ATTACHMENT_BYTES = "5242880"    # 5 MiB
 # REPLY_TO_EMAIL = "reply@yourdomain.com"  # optional — omit to reply to FROM_EMAIL
 # EMAIL_PROVIDER = "cloudflare"  # or "resend" — auto-detected if omitted
 
@@ -60,14 +66,19 @@ FROM_NAME = "Clawpost"
 #   wrangler secret put API_KEY
 #   wrangler secret put RESEND_API_KEY          (only needed for Resend provider)
 #   wrangler secret put WEBHOOK_SECRET          (optional: HMAC signing key for outbound webhooks)
+#   wrangler secret put RESEND_WEBHOOK_SIGNING_SECRET  (recommended: svix signature verification)
 #   wrangler secret put RESEND_WEBHOOK_SECRET   (optional: token for Resend delivery status webhooks)
 
 # --- Resend Delivery Webhooks ---
 # To track delivery status (sent/delivered/bounced/complained):
-#   1. Set RESEND_WEBHOOK_SECRET via `wrangler secret put RESEND_WEBHOOK_SECRET`
+#   1. Recommended: set RESEND_WEBHOOK_SIGNING_SECRET via
+#      `wrangler secret put RESEND_WEBHOOK_SIGNING_SECRET`
 #   2. In Resend dashboard → Webhooks → Add endpoint:
-#      URL: https://your-worker.dev/webhooks/resend?token=YOUR_SECRET
+#      URL: https://your-worker.dev/webhooks/resend
 #      Events: email.sent, email.delivered, email.bounced, email.complained
+#   3. Legacy fallback: token auth
+#      - set RESEND_WEBHOOK_SECRET via `wrangler secret put RESEND_WEBHOOK_SECRET`
+#      - URL becomes: https://your-worker.dev/webhooks/resend?token=YOUR_SECRET
 
 # --- Email Routing ---
 # Configure in Cloudflare dashboard:

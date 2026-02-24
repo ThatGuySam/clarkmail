@@ -10,11 +10,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "agents": "^0.0.74",
-    "hono": "^4.7.6",
+    "hono": "^4.12.2",
     "kysely": "^0.28.2",
     "kysely-d1": "^0.3.0",
     "postal-mime": "^2.4.1",
     "resend": "^4.1.2",
+    "svix": "^1.40.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {

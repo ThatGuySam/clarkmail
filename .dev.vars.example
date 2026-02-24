@@ -1,3 +1,7 @@
 API_KEY=your-api-key-here
 # Only needed when using Resend as email provider:
 # RESEND_API_KEY=re_your_resend_key_here
+# Recommended when using Resend delivery webhooks (svix signature verification):
+# RESEND_WEBHOOK_SIGNING_SECRET=whsec_your_signing_secret_here
+# Legacy fallback token mode for /webhooks/resend?token=...:
+# RESEND_WEBHOOK_SECRET=your-random-webhook-token

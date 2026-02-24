@@ -152,7 +152,11 @@ If `WEBHOOK_SECRET` is set, the payload is HMAC-SHA256 signed and the signature 
 
 ### Inbound (delivery status)
 
-ClawPost receives Resend delivery webhooks at `POST /webhooks/resend?token=<RESEND_WEBHOOK_SECRET>` and updates the message `status` field:
+ClawPost receives Resend delivery webhooks at `POST /webhooks/resend` and updates the message `status` field.
+
+Webhook auth options:
+- Recommended: `RESEND_WEBHOOK_SIGNING_SECRET` (Svix signature verification using `svix-id`, `svix-timestamp`, `svix-signature`)
+- Legacy fallback: `POST /webhooks/resend?token=<RESEND_WEBHOOK_SECRET>`
 
 | Resend Event | Status |
 |--------------|--------|
@@ -160,6 +164,14 @@ ClawPost receives Resend delivery webhooks at `POST /webhooks/resend?token=<RESE
 | `email.delivered` | `delivered` |
 | `email.bounced` | `bounced` |
 | `email.complained` | `complained` |
+
+## Security Defaults
+
+- `INBOUND_ALLOWED_RECIPIENTS` (comma-separated) restricts which envelope recipients are accepted
+- `INBOUND_REQUIRE_AUTH_PASS=true` requires at least one of SPF/DKIM/DMARC to pass before auto-approving an allowlisted sender
+- `MAX_INBOUND_BYTES` and `MAX_ATTACHMENT_BYTES` reject oversized inbound messages/attachments
+- API and MCP list/search routes clamp pagination parameters to bounded values
+- Resend webhook endpoint supports Svix signature verification (`RESEND_WEBHOOK_SIGNING_SECRET`)
 
 ## Sender Approval
 
@@ -195,7 +207,8 @@ wrangler d1 create clawpost-db           # note the database_id in the output
 wrangler r2 bucket create clawpost-attachments
 
 # Configure
-# Edit wrangler.toml — paste database_id, set FROM_EMAIL, FROM_NAME
+# Edit wrangler.toml — paste database_id, set FROM_EMAIL/FROM_NAME
+# and set INBOUND_ALLOWED_RECIPIENTS (for this setup: clark@samcarlton.com,clark@sam.lc)
 cp .dev.vars.example .dev.vars           # set API_KEY (+ RESEND_API_KEY if using Resend)
 
 # Apply D1 migrations
@@ -207,17 +220,22 @@ wrangler secret put API_KEY
 
 # Optional: webhook secrets
 wrangler secret put WEBHOOK_SECRET          # HMAC key for outbound webhooks
+wrangler secret put RESEND_WEBHOOK_SIGNING_SECRET  # recommended Resend Svix verification
 wrangler secret put RESEND_WEBHOOK_SECRET   # token for Resend delivery webhooks
 
 # Deploy
 bun run deploy
 ```
 
-Then in the Cloudflare dashboard: **Email Routing → Routing rules** → forward your address to the clawpost Worker.
+Then in Cloudflare dashboard configure both addresses to the same Worker inbox:
+
+1. `Email Routing` → `Custom addresses`: create/verify `clark@samcarlton.com` and `clark@sam.lc`
+2. `Email Routing` → `Routing rules`: create one rule per recipient (`clark@samcarlton.com` and `clark@sam.lc`), both with action `Send to Worker` to this same Worker
+3. Keep `INBOUND_ALLOWED_RECIPIENTS=clark@samcarlton.com,clark@sam.lc` so catch-all or misrouted aliases are rejected by the Worker
 
 ## REST API
 
-All `/api/*` routes require `X-API-Key` header. The `/webhooks/*` routes are unauthenticated (token-verified).
+All `/api/*` routes require `X-API-Key` header. The `/webhooks/*` routes are unauthenticated and must be verified by webhook secret/signature.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -243,7 +261,7 @@ All `/api/*` routes require `X-API-Key` header. The `/webhooks/*` routes are una
 | `POST` | `/api/approved-senders` | Approve a sender (`{email, name?}`) |
 | `DELETE` | `/api/approved-senders/:email` | Remove approved sender |
 | `GET` | `/api/approved-senders` | List approved senders |
-| `POST` | `/webhooks/resend` | Resend delivery status webhook (`?token=`) |
+| `POST` | `/webhooks/resend` | Resend delivery status webhook (Svix signature, with `?token=` fallback) |
 
 ## Future Improvements
 
@@ -254,7 +272,6 @@ All `/api/*` routes require `X-API-Key` header. The `/webhooks/*` routes are una
 - **Thread labels** — Apply labels at the thread level in addition to individual messages
 - **Scheduled sends** — Create a message to be sent at a future time
 - **Contact management** — Store contact metadata beyond the approved senders list (notes, tags, organization)
-- **Resend webhook signature verification** — Replace token-based auth with proper Svix signature verification for Resend webhooks
 - **Rate limiting** — Per-key rate limiting on API and MCP endpoints
 - **Bounce handling** — Auto-remove or flag senders whose messages consistently bounce
 

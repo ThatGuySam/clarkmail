@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { Webhook } from "svix";
 import { getDb } from "./db/client";
 import { sendEmail, replyToMessage } from "./mail";
 import { addLabels, removeLabel } from "./labels";
@@ -15,6 +16,19 @@ import {
 import type { Env } from "./types";
 
 const api = new Hono<{ Bindings: Env }>();
+const MAX_LIST_LIMIT = 100;
+const MAX_OFFSET = 10000;
+
+function parseBoundedInt(
+  value: string | undefined,
+  defaultValue: number,
+  min: number,
+  max: number
+): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return Math.min(max, Math.max(min, parsed));
+}
 
 // Auth middleware — timing-safe API key comparison
 api.use("/api/*", async (c, next) => {
@@ -44,7 +58,26 @@ const RESEND_STATUS_MAP: Record<string, string> = {
 };
 
 api.post("/webhooks/resend", async (c) => {
-  if (c.env.RESEND_WEBHOOK_SECRET) {
+  const rawPayload = await c.req.text();
+
+  if (c.env.RESEND_WEBHOOK_SIGNING_SECRET) {
+    const headers = {
+      "svix-id": c.req.header("svix-id") ?? "",
+      "svix-timestamp": c.req.header("svix-timestamp") ?? "",
+      "svix-signature": c.req.header("svix-signature") ?? "",
+    };
+
+    if (!headers["svix-id"] || !headers["svix-timestamp"] || !headers["svix-signature"]) {
+      return c.json({ error: "Missing webhook signature headers" }, 401);
+    }
+
+    try {
+      const webhook = new Webhook(c.env.RESEND_WEBHOOK_SIGNING_SECRET);
+      webhook.verify(rawPayload, headers);
+    } catch {
+      return c.json({ error: "Invalid webhook signature" }, 401);
+    }
+  } else if (c.env.RESEND_WEBHOOK_SECRET) {
     const token = c.req.query("token");
     if (!token) return c.json({ error: "Missing token" }, 401);
 
@@ -59,10 +92,12 @@ api.post("/webhooks/resend", async (c) => {
     }
   }
 
-  const payload = await c.req.json<{
-    type: string;
-    data: { email_id?: string };
-  }>();
+  let payload: { type: string; data: { email_id?: string } };
+  try {
+    payload = JSON.parse(rawPayload);
+  } catch {
+    return c.json({ error: "Invalid JSON payload" }, 400);
+  }
 
   const status = RESEND_STATUS_MAP[payload.type];
   if (!status || !payload.data?.email_id) {
@@ -123,8 +158,8 @@ api.post("/api/messages/:id/reply", async (c) => {
 // List messages (approved, non-archived by default)
 api.get("/api/messages", async (c) => {
   const db = getDb(c.env.DB);
-  const limit = Number(c.req.query("limit") ?? 50);
-  const offset = Number(c.req.query("offset") ?? 0);
+  const limit = parseBoundedInt(c.req.query("limit"), 50, 1, MAX_LIST_LIMIT);
+  const offset = parseBoundedInt(c.req.query("offset"), 0, 0, MAX_OFFSET);
   const direction = c.req.query("direction");
   const from = c.req.query("from");
   const label = c.req.query("label");
@@ -221,7 +256,7 @@ api.get("/api/attachments/:id", async (c) => {
 // Search messages (FTS5 with LIKE fallback)
 api.get("/api/search", async (c) => {
   const q = c.req.query("q");
-  const limit = Number(c.req.query("limit") ?? 20);
+  const limit = parseBoundedInt(c.req.query("limit"), 20, 1, 50);
   const includeArchived = c.req.query("include_archived") === "true";
 
   if (!q) return c.json({ error: "Missing query parameter 'q'" }, 400);
@@ -236,8 +271,8 @@ api.get("/api/search", async (c) => {
 // List threads (only threads that have approved messages)
 api.get("/api/threads", async (c) => {
   const db = getDb(c.env.DB);
-  const limit = Number(c.req.query("limit") ?? 50);
-  const offset = Number(c.req.query("offset") ?? 0);
+  const limit = parseBoundedInt(c.req.query("limit"), 50, 1, MAX_LIST_LIMIT);
+  const offset = parseBoundedInt(c.req.query("offset"), 0, 0, MAX_OFFSET);
 
   const threads = await db
     .selectFrom("threads")
@@ -327,8 +362,8 @@ api.post("/api/messages/:id/unarchive", async (c) => {
 
 api.get("/api/drafts", async (c) => {
   const db = getDb(c.env.DB);
-  const limit = Number(c.req.query("limit") ?? 50);
-  const offset = Number(c.req.query("offset") ?? 0);
+  const limit = parseBoundedInt(c.req.query("limit"), 50, 1, MAX_LIST_LIMIT);
+  const offset = parseBoundedInt(c.req.query("offset"), 0, 0, MAX_OFFSET);
   const drafts = await listDrafts(db, limit, offset);
   return c.json(drafts);
 });
@@ -392,8 +427,8 @@ api.delete("/api/drafts/:id", async (c) => {
 // List pending messages (metadata only — no body content)
 api.get("/api/pending", async (c) => {
   const db = getDb(c.env.DB);
-  const limit = Number(c.req.query("limit") ?? 50);
-  const offset = Number(c.req.query("offset") ?? 0);
+  const limit = parseBoundedInt(c.req.query("limit"), 50, 1, MAX_LIST_LIMIT);
+  const offset = parseBoundedInt(c.req.query("offset"), 0, 0, MAX_OFFSET);
 
   const messages = await db
     .selectFrom("messages")

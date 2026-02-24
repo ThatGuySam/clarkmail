@@ -15,9 +15,22 @@ import {
 } from "./drafts";
 import type { Env } from "./types";
 
+const MAX_LIST_LIMIT = 100;
+const MAX_OFFSET = 10000;
+
 /** Split comma-separated string into trimmed, non-empty parts */
 function parseCommaSeparated(value: string): string[] {
   return value.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function clampNumber(
+  value: number | undefined,
+  defaultValue: number,
+  min: number,
+  max: number
+): number {
+  if (value === undefined || Number.isNaN(value)) return defaultValue;
+  return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
 export class EmailMCP extends McpAgent<Env, {}, {}> {
@@ -80,8 +93,8 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
       {
         description: "List approved email messages with optional filters",
         inputSchema: {
-          limit: z.number().optional().default(50).describe("Max messages to return"),
-          offset: z.number().optional().default(0).describe("Offset for pagination"),
+          limit: z.number().int().min(1).max(MAX_LIST_LIMIT).optional().default(50).describe("Max messages to return"),
+          offset: z.number().int().min(0).max(MAX_OFFSET).optional().default(0).describe("Offset for pagination"),
           direction: z.enum(["inbound", "outbound"]).optional().describe("Filter by direction"),
           from: z.string().optional().describe("Filter by sender address"),
           label: z.string().optional().describe("Filter by label"),
@@ -90,13 +103,15 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
       },
       async ({ limit, offset, direction, from, label, include_archived }) => {
         const db = getDb(this.env.DB);
+        const safeLimit = clampNumber(limit, 50, 1, MAX_LIST_LIMIT);
+        const safeOffset = clampNumber(offset, 0, 0, MAX_OFFSET);
         let query = db
           .selectFrom("messages")
           .selectAll()
           .where("approved", "=", 1)
           .orderBy("created_at", "desc")
-          .limit(limit ?? 50)
-          .offset(offset ?? 0);
+          .limit(safeLimit)
+          .offset(safeOffset);
 
         if (!include_archived) query = query.where("archived", "=", 0);
         if (direction) query = query.where("direction", "=", direction);
@@ -294,13 +309,14 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
         description: "Search approved messages by subject or body text (full-text search)",
         inputSchema: {
           query: z.string().describe("Search query"),
-          limit: z.number().optional().default(20).describe("Max results"),
+          limit: z.number().int().min(1).max(50).optional().default(20).describe("Max results"),
           include_archived: z.boolean().optional().default(false).describe("Include archived messages"),
         },
       },
       async ({ query, limit, include_archived }) => {
         const db = getDb(this.env.DB);
-        const messages = await searchMessages(db, query, limit ?? 20, include_archived ?? false);
+        const safeLimit = clampNumber(limit, 20, 1, 50);
+        const messages = await searchMessages(db, query, safeLimit, include_archived ?? false);
 
         return {
           content: [
@@ -319,12 +335,14 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
       {
         description: "List email threads that contain approved messages",
         inputSchema: {
-          limit: z.number().optional().default(50).describe("Max threads to return"),
-          offset: z.number().optional().default(0).describe("Offset for pagination"),
+          limit: z.number().int().min(1).max(MAX_LIST_LIMIT).optional().default(50).describe("Max threads to return"),
+          offset: z.number().int().min(0).max(MAX_OFFSET).optional().default(0).describe("Offset for pagination"),
         },
       },
       async ({ limit, offset }) => {
         const db = getDb(this.env.DB);
+        const safeLimit = clampNumber(limit, 50, 1, MAX_LIST_LIMIT);
+        const safeOffset = clampNumber(offset, 0, 0, MAX_OFFSET);
         const threads = await db
           .selectFrom("threads")
           .selectAll()
@@ -334,8 +352,8 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
               .where("approved", "=", 1)
           )
           .orderBy("last_message_at", "desc")
-          .limit(limit ?? 50)
-          .offset(offset ?? 0)
+          .limit(safeLimit)
+          .offset(safeOffset)
           .execute();
 
         return {
@@ -553,13 +571,15 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
       {
         description: "List all email drafts",
         inputSchema: {
-          limit: z.number().optional().default(50).describe("Max drafts to return"),
-          offset: z.number().optional().default(0).describe("Offset for pagination"),
+          limit: z.number().int().min(1).max(MAX_LIST_LIMIT).optional().default(50).describe("Max drafts to return"),
+          offset: z.number().int().min(0).max(MAX_OFFSET).optional().default(0).describe("Offset for pagination"),
         },
       },
       async ({ limit, offset }) => {
         const db = getDb(this.env.DB);
-        const drafts = await listDrafts(db, limit ?? 50, offset ?? 0);
+        const safeLimit = clampNumber(limit, 50, 1, MAX_LIST_LIMIT);
+        const safeOffset = clampNumber(offset, 0, 0, MAX_OFFSET);
+        const drafts = await listDrafts(db, safeLimit, safeOffset);
 
         return {
           content: [
@@ -645,19 +665,21 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
       {
         description: "List pending unapproved messages. Returns metadata only (sender, subject, timestamp) — no body content for security.",
         inputSchema: {
-          limit: z.number().optional().default(50).describe("Max messages to return"),
-          offset: z.number().optional().default(0).describe("Offset for pagination"),
+          limit: z.number().int().min(1).max(MAX_LIST_LIMIT).optional().default(50).describe("Max messages to return"),
+          offset: z.number().int().min(0).max(MAX_OFFSET).optional().default(0).describe("Offset for pagination"),
         },
       },
       async ({ limit, offset }) => {
         const db = getDb(this.env.DB);
+        const safeLimit = clampNumber(limit, 50, 1, MAX_LIST_LIMIT);
+        const safeOffset = clampNumber(offset, 0, 0, MAX_OFFSET);
         const messages = await db
           .selectFrom("messages")
           .select(["id", "from", "subject", "direction", "created_at"])
           .where("approved", "=", 0)
           .orderBy("created_at", "desc")
-          .limit(limit ?? 50)
-          .offset(offset ?? 0)
+          .limit(safeLimit)
+          .offset(safeOffset)
           .execute();
 
         return {

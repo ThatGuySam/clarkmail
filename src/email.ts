@@ -4,14 +4,84 @@ import { getDb } from "./db/client";
 import { dispatchWebhook } from "./webhooks";
 import type { Env } from "./types";
 
+const DEFAULT_MAX_INBOUND_BYTES = 10 * 1024 * 1024; // 10 MiB
+const DEFAULT_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MiB
+
+function parseAllowedRecipients(value?: string): Set<string> {
+  if (!value) return new Set();
+  return new Set(
+    value
+      .split(",")
+      .map((addr) => addr.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+function parseByteLimit(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function hasPassingMailAuth(authResults: string | null): boolean {
+  if (!authResults) return false;
+  const value = authResults.toLowerCase();
+  return (
+    /\bdmarc=pass\b/.test(value) ||
+    /\bdkim=pass\b/.test(value) ||
+    /\bspf=pass\b/.test(value)
+  );
+}
+
+function getAttachmentSize(content: unknown): number {
+  if (typeof content === "string") {
+    return new TextEncoder().encode(content).byteLength;
+  }
+  if (content instanceof ArrayBuffer) return content.byteLength;
+  if (ArrayBuffer.isView(content)) return content.byteLength;
+  return 0;
+}
+
 export async function handleInboundEmail(
   message: ForwardableEmailMessage,
   env: Env,
   ctx: ExecutionContext
 ) {
+  const allowedRecipients = parseAllowedRecipients(env.INBOUND_ALLOWED_RECIPIENTS);
+  const recipient = message.to.toLowerCase();
+  if (allowedRecipients.size > 0 && !allowedRecipients.has(recipient)) {
+    message.setReject("Recipient is not allowed");
+    return;
+  }
+
+  const maxInboundBytes = parseByteLimit(
+    env.MAX_INBOUND_BYTES,
+    DEFAULT_MAX_INBOUND_BYTES
+  );
+  if (message.rawSize > maxInboundBytes) {
+    message.setReject("Message exceeds maximum allowed size");
+    return;
+  }
+
   const raw = new Response(message.raw);
   const arrayBuffer = await raw.arrayBuffer();
+  if (arrayBuffer.byteLength > maxInboundBytes) {
+    message.setReject("Message exceeds maximum allowed size");
+    return;
+  }
+
   const parsed = await PostalMime.parse(arrayBuffer);
+  const maxAttachmentBytes = parseByteLimit(
+    env.MAX_ATTACHMENT_BYTES,
+    DEFAULT_MAX_ATTACHMENT_BYTES
+  );
+  const oversizedAttachment = parsed.attachments?.find((att) => {
+    const size = getAttachmentSize(att.content);
+    return size > maxAttachmentBytes;
+  });
+  if (oversizedAttachment) {
+    message.setReject("Attachment exceeds maximum allowed size");
+    return;
+  }
 
   const db = getDb(env.DB);
   const now = Date.now();
@@ -30,7 +100,22 @@ export async function handleInboundEmail(
     .select("email")
     .where("email", "=", from)
     .executeTakeFirst();
-  const approved = approvedSender ? 1 : 0;
+  const autoApproveAll =
+    (env.INBOUND_AUTO_APPROVE_ALL ?? "false").toLowerCase() === "true";
+  const requireAuthPass =
+    (env.INBOUND_REQUIRE_AUTH_PASS ?? "true").toLowerCase() !== "false";
+  const authResults = message.headers.get("Authentication-Results");
+  const senderAuthenticated = hasPassingMailAuth(authResults);
+  if (!autoApproveAll && approvedSender && requireAuthPass && !senderAuthenticated) {
+    console.warn(
+      `Sender ${from} is allowlisted but Authentication-Results did not pass`
+    );
+  }
+
+  const approved =
+    autoApproveAll || (approvedSender && (!requireAuthPass || senderAuthenticated))
+      ? 1
+      : 0;
 
   // Threading: find existing thread by In-Reply-To or References
   let threadId: string | null = null;
@@ -122,7 +207,7 @@ export async function handleInboundEmail(
       const attId = crypto.randomUUID();
       const r2Key = `${msgId}/${attId}/${att.filename ?? "attachment"}`;
 
-      const content = att.content as ArrayBuffer;
+      const content = att.content as string | ArrayBuffer | Uint8Array;
       await env.ATTACHMENTS.put(r2Key, content);
 
       await db
@@ -132,7 +217,7 @@ export async function handleInboundEmail(
           message_id: msgId,
           filename: att.filename ?? null,
           content_type: att.mimeType ?? null,
-          size: content.byteLength,
+          size: getAttachmentSize(content),
           r2_key: r2Key,
           created_at: now,
         })

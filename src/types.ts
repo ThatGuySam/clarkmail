@@ -62,7 +62,19 @@ export interface Env {
   RESEND_FROM_EMAIL?: string;
   RESEND_FROM_NAME?: string;
   RESEND_REPLY_TO_EMAIL?: string;
+  /** Comma-separated envelope recipients allowed for inbound processing */
+  INBOUND_ALLOWED_RECIPIENTS?: string;
+  /** Set to "true" to auto-approve all inbound senders (disables sender allowlist gate) */
+  INBOUND_AUTO_APPROVE_ALL?: string;
+  /** Set to "false" to skip SPF/DKIM/DMARC pass requirement for allowlisted senders */
+  INBOUND_REQUIRE_AUTH_PASS?: string;
+  /** Max raw inbound message size in bytes (defaults to 10 MiB) */
+  MAX_INBOUND_BYTES?: string;
+  /** Max single attachment size in bytes (defaults to 5 MiB) */
+  MAX_ATTACHMENT_BYTES?: string;
   WEBHOOK_URL?: string;
   WEBHOOK_SECRET?: string;
   RESEND_WEBHOOK_SECRET?: string;
+  /** Resend svix signing secret for webhook signature verification */
+  RESEND_WEBHOOK_SIGNING_SECRET?: string;
 }
