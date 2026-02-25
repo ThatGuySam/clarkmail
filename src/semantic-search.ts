@@ -1,5 +1,7 @@
+import PostalMime from "postal-mime";
 import type { Kysely } from "kysely";
-import type { Database, Message } from "./db/schema";
+import { getDb } from "./db/client";
+import type { Attachment, Database, Message } from "./db/schema";
 import type { Env } from "./types";
 
 const DEFAULT_EMBEDDING_MODEL = "@cf/google/embeddinggemma-300m";
@@ -7,8 +9,45 @@ const EMBEDDING_GEMMA_MODEL = "@cf/google/embeddinggemma-300m";
 const EMBEDDING_GEMMA_MAX_DIMENSIONS = 768;
 const DEFAULT_VECTOR_NAMESPACE = "messages";
 const MAX_DOCUMENT_CHARS = 6000;
+const MAX_BODY_CHARS = 3600;
+const MAX_ATTACHMENT_DOCUMENT_CHARS = 2200;
+const MAX_ATTACHMENT_CHARS_PER_FILE = 1100;
+const MAX_ATTACHMENTS_PER_MESSAGE = 8;
+const MAX_ATTACHMENT_BYTES = 512 * 1024;
 const MAX_SUBJECT_CHARS = 220;
 const MAX_ADDRESS_CHARS = 140;
+const MAX_ATTACHMENT_NAME_CHARS = 120;
+
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  "txt",
+  "text",
+  "md",
+  "markdown",
+  "csv",
+  "tsv",
+  "json",
+  "xml",
+  "yaml",
+  "yml",
+  "log",
+  "html",
+  "htm",
+  "ics",
+  "eml",
+]);
+
+const TEXT_ATTACHMENT_MIME_TYPES = new Set([
+  "application/json",
+  "application/ld+json",
+  "application/xml",
+  "application/javascript",
+  "application/x-javascript",
+  "application/x-ndjson",
+  "application/yaml",
+  "application/x-yaml",
+  "application/x-www-form-urlencoded",
+  "message/rfc822",
+]);
 
 export type SearchableMessage = Pick<
   Message,
@@ -47,6 +86,11 @@ interface EmbeddingOutput {
   shape?: unknown;
 }
 
+type AttachmentForSemanticIndex = Pick<
+  Attachment,
+  "id" | "filename" | "content_type" | "size" | "r2_key"
+>;
+
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -57,6 +101,131 @@ function truncate(value: string, maxChars: number): string {
 
 function clean(value: string, maxChars: number): string {
   return truncate(normalizeWhitespace(value), maxChars);
+}
+
+function baseMimeType(contentType: string | null): string {
+  return contentType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
+
+function extensionFromFilename(filename: string | null): string {
+  if (!filename) return "";
+  const idx = filename.lastIndexOf(".");
+  return idx >= 0 ? filename.slice(idx + 1).trim().toLowerCase() : "";
+}
+
+function isAttachedEmail(contentType: string | null, filename: string | null): boolean {
+  return (
+    baseMimeType(contentType) === "message/rfc822" ||
+    extensionFromFilename(filename) === "eml"
+  );
+}
+
+function isTextLikeAttachment(attachment: AttachmentForSemanticIndex): boolean {
+  const mime = baseMimeType(attachment.content_type);
+  if (isAttachedEmail(attachment.content_type, attachment.filename)) return true;
+  if (mime.startsWith("text/")) return true;
+  if (TEXT_ATTACHMENT_MIME_TYPES.has(mime)) return true;
+  return TEXT_ATTACHMENT_EXTENSIONS.has(extensionFromFilename(attachment.filename));
+}
+
+function isLikelyBinaryText(value: string): boolean {
+  if (!value) return false;
+  const sample = value.slice(0, 2000);
+  if (!sample) return false;
+
+  let controlChars = 0;
+  let replacementChars = 0;
+  for (const char of sample) {
+    const code = char.charCodeAt(0);
+    if (code === 0xfffd) replacementChars += 1;
+    if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
+      controlChars += 1;
+    }
+  }
+
+  return controlChars / sample.length > 0.02 || replacementChars / sample.length > 0.1;
+}
+
+function sliceArrayBuffer(buffer: ArrayBuffer, maxBytes: number): ArrayBuffer {
+  return buffer.byteLength <= maxBytes ? buffer : buffer.slice(0, maxBytes);
+}
+
+async function extractAttachedEmailText(buffer: ArrayBuffer): Promise<string> {
+  const parsed = await PostalMime.parse(buffer);
+  const parts: string[] = [];
+
+  if (parsed.subject) parts.push(`subject: ${clean(parsed.subject, 320)}`);
+  if (parsed.from?.address) parts.push(`from: ${clean(parsed.from.address, 180)}`);
+  if (parsed.to?.length) {
+    parts.push(`to: ${clean(parsed.to.map((addr) => addr.address).join(", "), 220)}`);
+  }
+  if (parsed.text) parts.push(`body: ${clean(parsed.text, MAX_ATTACHMENT_CHARS_PER_FILE)}`);
+
+  return clean(parts.join("\n"), MAX_ATTACHMENT_CHARS_PER_FILE);
+}
+
+function extractPlainTextAttachment(buffer: ArrayBuffer): string {
+  const text = new TextDecoder().decode(new Uint8Array(buffer));
+  if (isLikelyBinaryText(text)) return "";
+  return clean(text, MAX_ATTACHMENT_CHARS_PER_FILE);
+}
+
+async function collectMessageAttachmentText(
+  env: Env,
+  db: Kysely<Database>,
+  messageId: string
+): Promise<string> {
+  const attachments = (await db
+    .selectFrom("attachments")
+    .select(["id", "filename", "content_type", "size", "r2_key"])
+    .where("message_id", "=", messageId)
+    .orderBy("created_at", "asc")
+    .execute()) as AttachmentForSemanticIndex[];
+
+  if (attachments.length === 0) return "";
+
+  const parts: string[] = [];
+
+  for (const attachment of attachments) {
+    if (parts.length >= MAX_ATTACHMENTS_PER_MESSAGE) break;
+    if (!isTextLikeAttachment(attachment)) continue;
+    if (attachment.size && attachment.size > MAX_ATTACHMENT_BYTES * 4) continue;
+
+    try {
+      const object = await env.ATTACHMENTS.get(attachment.r2_key);
+      if (!object) continue;
+
+      const rawBuffer = await object.arrayBuffer();
+      const limitedBuffer = sliceArrayBuffer(rawBuffer, MAX_ATTACHMENT_BYTES);
+
+      let text = "";
+      if (isAttachedEmail(attachment.content_type, attachment.filename)) {
+        try {
+          text = await extractAttachedEmailText(limitedBuffer);
+        } catch {
+          text = extractPlainTextAttachment(limitedBuffer);
+        }
+      } else {
+        text = extractPlainTextAttachment(limitedBuffer);
+      }
+
+      if (!text) continue;
+
+      const attachmentName = clean(
+        attachment.filename ?? attachment.id,
+        MAX_ATTACHMENT_NAME_CHARS
+      );
+      parts.push(`attachment ${attachmentName}: ${text}`);
+    } catch (error) {
+      console.warn("Failed to extract attachment text for semantic index", {
+        messageId,
+        attachmentId: attachment.id,
+        error,
+      });
+    }
+  }
+
+  return truncate(parts.join("\n"), MAX_ATTACHMENT_DOCUMENT_CHARS);
 }
 
 function getEmbeddingModel(env: Env): string {
@@ -120,7 +289,7 @@ function extractEmbeddingVector(result: EmbeddingOutput): number[] | null {
   return data.slice(0, dimensions);
 }
 
-function buildIndexDocument(message: SearchableMessage): string {
+function buildIndexDocument(message: SearchableMessage, attachmentText: string): string {
   const parts = [
     `subject: ${clean(message.subject, 320)}`,
     `from: ${clean(message.from, 180)}`,
@@ -129,8 +298,9 @@ function buildIndexDocument(message: SearchableMessage): string {
   ];
 
   if (message.body_text) {
-    parts.push(`body: ${clean(message.body_text, MAX_DOCUMENT_CHARS)}`);
+    parts.push(`body: ${clean(message.body_text, MAX_BODY_CHARS)}`);
   }
+  if (attachmentText) parts.push(`attachments: ${attachmentText}`);
 
   return truncate(parts.join("\n"), MAX_DOCUMENT_CHARS);
 }
@@ -165,12 +335,15 @@ export function semanticSearchEnabled(
 
 export async function indexMessageForSemanticSearch(
   env: Env,
-  message: SearchableMessage
+  message: SearchableMessage,
+  db?: Kysely<Database>
 ): Promise<boolean> {
   if (!semanticSearchEnabled(env)) return false;
   if (message.approved !== 1) return false;
 
-  const document = buildIndexDocument(message);
+  const queryDb = db ?? getDb(env.DB);
+  const attachmentText = await collectMessageAttachmentText(env, queryDb, message.id);
+  const document = buildIndexDocument(message, attachmentText);
   if (!document) return false;
 
   const embedding = await embedText(env, document);
@@ -245,7 +418,7 @@ export async function backfillSemanticIndex(
 
   for (const message of messages) {
     try {
-      const wasIndexed = await indexMessageForSemanticSearch(env, message);
+      const wasIndexed = await indexMessageForSemanticSearch(env, message, db);
       if (wasIndexed) indexed += 1;
     } catch (error) {
       console.warn("Failed to index message embedding", { messageId: message.id, error });
@@ -272,7 +445,7 @@ export async function indexSenderMessagesForSemanticSearch(
   let indexed = 0;
   for (const message of messages) {
     try {
-      const wasIndexed = await indexMessageForSemanticSearch(env, message);
+      const wasIndexed = await indexMessageForSemanticSearch(env, message, db);
       if (wasIndexed) indexed += 1;
     } catch (error) {
       console.warn("Failed to index approved sender message", {

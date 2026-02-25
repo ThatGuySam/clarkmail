@@ -5,8 +5,6 @@ import type { Env } from "./types";
 
 const MIN_VECTOR_TOP_K = 20;
 const VECTOR_TOP_K_MULTIPLIER = 4;
-const HYBRID_KEYWORD_MULTIPLIER = 3;
-const RRF_SMOOTHING = 60;
 
 export type SearchMode = "keyword" | "vector" | "hybrid";
 
@@ -99,10 +97,6 @@ function vectorTopK(limit: number): number {
   return Math.max(MIN_VECTOR_TOP_K, limit * VECTOR_TOP_K_MULTIPLIER);
 }
 
-function reciprocalRank(rank: number): number {
-  return 1 / (RRF_SMOOTHING + rank + 1);
-}
-
 async function searchMessagesByVector(
   db: Kysely<Database>,
   env: Env,
@@ -125,30 +119,14 @@ async function searchMessagesHybrid(
   limit: number,
   includeArchived: boolean
 ): Promise<Message[]> {
-  const keywordCandidates = await searchMessagesByKeyword(
-    db,
-    query,
-    Math.max(limit, limit * HYBRID_KEYWORD_MULTIPLIER),
-    includeArchived
-  );
+  const keywordCandidates = await searchMessagesByKeyword(db, query, limit, includeArchived);
 
   const vectorMatches = await querySemanticMatches(env, query, vectorTopK(limit));
   if (vectorMatches.length === 0) return keywordCandidates.slice(0, limit);
 
-  const fusedScores = new Map<string, number>();
-  for (const [rank, message] of keywordCandidates.entries()) {
-    fusedScores.set(message.id, (fusedScores.get(message.id) ?? 0) + reciprocalRank(rank));
-  }
-  for (const [rank, match] of vectorMatches.entries()) {
-    fusedScores.set(match.id, (fusedScores.get(match.id) ?? 0) + reciprocalRank(rank));
-  }
-
-  const rankedIds = [...fusedScores.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([id]) => id);
-
   const messagesById = new Map(keywordCandidates.map((message) => [message.id, message]));
-  const missingIds = rankedIds.filter((id) => !messagesById.has(id));
+  const vectorIds = vectorMatches.map((match) => match.id);
+  const missingIds = vectorIds.filter((id) => !messagesById.has(id));
   if (missingIds.length > 0) {
     const fetched = await fetchApprovedMessagesById(db, missingIds, includeArchived);
     for (const [id, message] of fetched) {
@@ -156,8 +134,22 @@ async function searchMessagesHybrid(
     }
   }
 
-  const fused = orderById(rankedIds, messagesById, limit);
-  return fused.length > 0 ? fused : keywordCandidates.slice(0, limit);
+  const orderedIds: string[] = [];
+  const seen = new Set<string>();
+
+  for (const message of keywordCandidates) {
+    if (seen.has(message.id)) continue;
+    orderedIds.push(message.id);
+    seen.add(message.id);
+  }
+
+  for (const id of vectorIds) {
+    if (seen.has(id)) continue;
+    orderedIds.push(id);
+    seen.add(id);
+  }
+
+  return orderById(orderedIds, messagesById, limit);
 }
 
 export async function searchMessages(

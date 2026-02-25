@@ -202,25 +202,6 @@ export async function handleInboundEmail(
     })
     .execute();
 
-  if (approved === 1) {
-    ctx.waitUntil(
-      indexMessageForSemanticSearch(env, {
-        id: msgId,
-        thread_id: threadId,
-        from,
-        to,
-        subject,
-        body_text: parsed.text ?? null,
-        direction: "inbound",
-        approved,
-        archived: 0,
-        created_at: now,
-      }).catch((error) => {
-        console.warn("Failed to index inbound message embedding", { messageId: msgId, error });
-      })
-    );
-  }
-
   // Store attachments in R2
   if (parsed.attachments?.length) {
     for (const att of parsed.attachments) {
@@ -243,6 +224,29 @@ export async function handleInboundEmail(
         })
         .execute();
     }
+  }
+
+  if (approved === 1) {
+    ctx.waitUntil(
+      indexMessageForSemanticSearch(
+        env,
+        {
+          id: msgId,
+          thread_id: threadId,
+          from,
+          to,
+          subject,
+          body_text: parsed.text ?? null,
+          direction: "inbound",
+          approved,
+          archived: 0,
+          created_at: now,
+        },
+        db
+      ).catch((error) => {
+        console.warn("Failed to index inbound message embedding", { messageId: msgId, error });
+      })
+    );
   }
 
   // Dispatch webhook for inbound message

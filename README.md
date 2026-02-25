@@ -57,7 +57,7 @@ Use the Streamable HTTP transport with your worker URL and Bearer token auth. Ex
 | `list_messages` | List messages (filter by direction, sender, label; excludes archived by default) |
 | `read_message` | Read a message with attachment metadata and labels |
 | `get_attachment` | Download attachment content (base64) |
-| `search_messages` | Search by `mode=keyword|vector|hybrid` (hybrid = FTS + semantic vectors) |
+| `search_messages` | Search by `mode=keyword|vector|hybrid` (hybrid = lexical matches first, then semantic matches, including text-like attachments) |
 | `reindex_semantic_search` | Backfill vectors for existing approved messages |
 | `list_threads` | List conversation threads |
 
@@ -108,7 +108,7 @@ Status:   Resend webhook → /webhooks/resend → D1 status update
 - **D1** stores messages, threads, drafts, labels, and attachment metadata
 - **R2** stores attachment blobs (D1 has a 1 MiB row limit)
 - **FTS5** virtual table provides lexical search with automatic sync via triggers
-- **Workers AI + Vectorize** (optional) adds semantic vector retrieval with hybrid ranking
+- **Workers AI + Vectorize** (optional) adds semantic vector retrieval with hybrid ranking, including text-like attachments (`.txt`, `.md`, `.json`, `.eml`, `message/rfc822`, etc.)
 - **McpAgent** Durable Object serves the MCP endpoint at `/mcp` (Streamable HTTP)
 - **Hono** serves a REST API at `/api/*` for direct HTTP access
 
@@ -253,7 +253,7 @@ All `/api/*` routes require `X-API-Key` header. The `/webhooks/*` routes are una
 | `POST` | `/api/messages/:id/archive` | Archive a message |
 | `POST` | `/api/messages/:id/unarchive` | Unarchive a message |
 | `GET` | `/api/attachments/:id` | Download attachment (approved messages only) |
-| `GET` | `/api/search` | Search (`?q=&limit=&include_archived=&mode=keyword|vector|hybrid`) |
+| `GET` | `/api/search` | Search (`?q=&limit=&include_archived=&mode=keyword|vector|hybrid`; `include_archived` defaults to `true`) |
 | `POST` | `/api/search/reindex` | Backfill semantic vectors (`?limit=&offset=&include_archived=`) |
 | `GET` | `/api/threads` | List threads (`?limit=&offset=`) |
 | `GET` | `/api/threads/:id` | Thread with all approved messages |

@@ -311,11 +311,12 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
     this.server.registerTool(
       "search_messages",
       {
-        description: "Search approved messages by subject/body using keyword, vector, or hybrid retrieval",
+        description:
+          "Search approved messages by subject/body using keyword, vector, or hybrid retrieval (hybrid returns lexical matches first, then semantic matches)",
         inputSchema: {
           query: z.string().describe("Search query"),
           limit: z.number().int().min(1).max(50).optional().default(20).describe("Max results"),
-          include_archived: z.boolean().optional().default(false).describe("Include archived messages"),
+          include_archived: z.boolean().optional().default(true).describe("Include archived messages"),
           mode: z.enum(["keyword", "vector", "hybrid"]).optional().default("hybrid")
             .describe("Search mode (hybrid is recommended)"),
         },
@@ -328,7 +329,7 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
           this.env,
           query,
           safeLimit,
-          include_archived ?? false,
+          include_archived ?? true,
           mode ?? "hybrid"
         );
 

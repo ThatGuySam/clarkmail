@@ -262,7 +262,9 @@ api.get("/api/attachments/:id", async (c) => {
 api.get("/api/search", async (c) => {
   const q = c.req.query("q");
   const limit = parseBoundedInt(c.req.query("limit"), 20, 1, 50);
-  const includeArchived = c.req.query("include_archived") === "true";
+  const includeArchivedParam = c.req.query("include_archived");
+  const includeArchived =
+    includeArchivedParam === undefined ? true : includeArchivedParam === "true";
   const modeValue = c.req.query("mode");
   const mode = parseSearchMode(modeValue);
 
