@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "wrangler dev --remote",
     "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 migrations apply DB --remote"
+    "db:migrate": "wrangler d1 migrations apply DB --remote",
+    "proxy:dev": "node proxy/server.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

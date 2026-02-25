@@ -1,0 +1,276 @@
+openapi: 3.1.0
+info:
+  title: Clawpost Local Proxy API
+  version: 1.0.0
+  description: |
+    Local proxy for Clawpost. This server forwards requests to the deployed Clawpost Worker and injects
+    X-API-Key from local environment variables so LLM clients do not need direct access to sensitive keys.
+servers:
+  - url: http://127.0.0.1:8788
+    description: Default local proxy URL
+paths:
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: Verify the local proxy is running.
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, proxy, upstream]
+                properties:
+                  ok:
+                    type: boolean
+                  proxy:
+                    type: string
+                  upstream:
+                    type: string
+  /api/search:
+    get:
+      operationId: searchMessages
+      summary: Search approved messages
+      description: |
+        Search messages with keyword, vector, or hybrid mode.
+        Hybrid mode returns lexical matches first, then semantic matches.
+        Vector and hybrid matches may include semantic chunk snippets in `semantic_matches`.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query text.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+        - name: include_archived
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+          description: Include archived messages in search results.
+        - name: mode
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [keyword, vector, hybrid]
+            default: hybrid
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SearchResult'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/search/reindex:
+    post:
+      operationId: reindexSemanticSearch
+      summary: Reindex semantic vectors
+      description: Backfill semantic vectors for approved messages.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: include_archived
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Reindex summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  [indexed, scanned, enabled, limit, offset, include_archived, semantic_search_enabled]
+                properties:
+                  indexed:
+                    type: integer
+                  scanned:
+                    type: integer
+                  enabled:
+                    type: boolean
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+                  include_archived:
+                    type: boolean
+                  semantic_search_enabled:
+                    type: boolean
+  /api/messages:
+    get:
+      operationId: listMessages
+      summary: List approved messages
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: direction
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [inbound, outbound]
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: label
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: include_archived
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Message list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SearchResult'
+  /api/messages/{id}:
+    get:
+      operationId: readMessage
+      summary: Read one approved message
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Message with labels and attachment metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  schemas:
+    SearchResult:
+      type: object
+      required:
+        [id, thread_id, from, to, subject, direction, approved, archived, created_at]
+      properties:
+        id:
+          type: string
+        thread_id:
+          type: string
+        message_id:
+          type: [string, 'null']
+        in_reply_to:
+          type: [string, 'null']
+        from:
+          type: string
+        to:
+          type: string
+        cc:
+          type: [string, 'null']
+        bcc:
+          type: [string, 'null']
+        subject:
+          type: string
+        body_text:
+          type: [string, 'null']
+        body_html:
+          type: [string, 'null']
+        headers:
+          type: [string, 'null']
+        direction:
+          type: string
+          enum: [inbound, outbound]
+        approved:
+          type: integer
+        status:
+          type: [string, 'null']
+        archived:
+          type: integer
+        created_at:
+          type: integer
+        semantic_score:
+          type: number
+          description: Present when semantic matching contributed to this result.
+        semantic_matches:
+          type: array
+          description: Top matched embedding chunks for this message.
+          items:
+            $ref: '#/components/schemas/SemanticChunkMatch'
+    SemanticChunkMatch:
+      type: object
+      required: [vector_id, score, text]
+      properties:
+        vector_id:
+          type: string
+        score:
+          type: number
+        chunk_index:
+          type: [integer, 'null']
+        text:
+          type: string
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
