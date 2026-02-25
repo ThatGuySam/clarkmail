@@ -57,7 +57,8 @@ Use the Streamable HTTP transport with your worker URL and Bearer token auth. Ex
 | `list_messages` | List messages (filter by direction, sender, label; excludes archived by default) |
 | `read_message` | Read a message with attachment metadata and labels |
 | `get_attachment` | Download attachment content (base64) |
-| `search_messages` | Full-text search by subject or body (FTS5 with LIKE fallback) |
+| `search_messages` | Search by `mode=keyword|vector|hybrid` (hybrid = FTS + semantic vectors) |
+| `reindex_semantic_search` | Backfill vectors for existing approved messages |
 | `list_threads` | List conversation threads |
 
 ### Label Tools
@@ -98,7 +99,7 @@ Use the Streamable HTTP transport with your worker URL and Bearer token auth. Ex
 ```
 Inbound:  email → CF Email Routing → Worker → postal-mime → D1 + R2 → webhook
 Outbound: MCP tool / API → CF Email Service or Resend → D1 + R2
-Query:    MCP tool / API → D1 (FTS5) → results
+Query:    MCP tool / API → D1 (FTS5) + Workers AI + Vectorize (optional) → results
 Status:   Resend webhook → /webhooks/resend → D1 status update
 ```
 
@@ -106,7 +107,8 @@ Status:   Resend webhook → /webhooks/resend → D1 status update
 - **Cloudflare Email Service** or **Resend** sends outbound email (configurable via `EMAIL_PROVIDER` or auto-detected). Per-provider sender addresses supported via `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` / `RESEND_REPLY_TO_EMAIL` overrides
 - **D1** stores messages, threads, drafts, labels, and attachment metadata
 - **R2** stores attachment blobs (D1 has a 1 MiB row limit)
-- **FTS5** virtual table provides full-text search with automatic sync via triggers
+- **FTS5** virtual table provides lexical search with automatic sync via triggers
+- **Workers AI + Vectorize** (optional) adds semantic vector retrieval with hybrid ranking
 - **McpAgent** Durable Object serves the MCP endpoint at `/mcp` (Streamable HTTP)
 - **Hono** serves a REST API at `/api/*` for direct HTTP access
 
@@ -205,10 +207,13 @@ bun install
 # Create Cloudflare resources
 wrangler d1 create clawpost-db           # note the database_id in the output
 wrangler r2 bucket create clawpost-attachments
+# Optional semantic index:
+# wrangler vectorize create clawpost-message-vectors --dimensions=768 --metric=cosine
 
 # Configure
 # Edit wrangler.toml — paste database_id, set FROM_EMAIL/FROM_NAME
 # and set INBOUND_ALLOWED_RECIPIENTS (for this setup: clark@samcarlton.com,clark@sam.lc)
+# Optional semantic search: configure [ai] + [[vectorize]] bindings in wrangler.toml
 cp .dev.vars.example .dev.vars           # set API_KEY (+ RESEND_API_KEY if using Resend)
 
 # Apply D1 migrations
@@ -248,7 +253,8 @@ All `/api/*` routes require `X-API-Key` header. The `/webhooks/*` routes are una
 | `POST` | `/api/messages/:id/archive` | Archive a message |
 | `POST` | `/api/messages/:id/unarchive` | Unarchive a message |
 | `GET` | `/api/attachments/:id` | Download attachment (approved messages only) |
-| `GET` | `/api/search` | Full-text search (`?q=&limit=&include_archived=`) |
+| `GET` | `/api/search` | Search (`?q=&limit=&include_archived=&mode=keyword|vector|hybrid`) |
+| `POST` | `/api/search/reindex` | Backfill semantic vectors (`?limit=&offset=&include_archived=`) |
 | `GET` | `/api/threads` | List threads (`?limit=&offset=`) |
 | `GET` | `/api/threads/:id` | Thread with all approved messages |
 | `GET` | `/api/drafts` | List drafts (`?limit=&offset=`) |
@@ -265,7 +271,7 @@ All `/api/*` routes require `X-API-Key` header. The `/webhooks/*` routes are una
 
 ## Future Improvements
 
-- **Semantic search** — Replace or augment FTS5 with vector embeddings via Cloudflare Workers AI + Vectorize for meaning-based search across messages
+- **Result reranking** — Add optional cross-encoder reranking for final top-k precision
 - **Webhook event expansion** — Emit events for `message.sent`, `sender.approved`, `thread.created` in addition to `message.received`
 - **Draft attachments** — Support attaching files to drafts (currently drafts are text-only; attachments can be added when sending via `send_email`)
 - **Thread-level archival** — Archive/unarchive all messages in a thread in one operation

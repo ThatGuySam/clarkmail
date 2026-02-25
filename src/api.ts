@@ -4,7 +4,7 @@ import { getDb } from "./db/client";
 import { sendEmail, replyToMessage } from "./mail";
 import { addLabels, removeLabel } from "./labels";
 import { archiveMessage, unarchiveMessage } from "./archive";
-import { searchMessages } from "./search";
+import { parseSearchMode, searchMessages } from "./search";
 import {
   createDraft,
   getDraft,
@@ -13,6 +13,11 @@ import {
   sendDraft,
   deleteDraft,
 } from "./drafts";
+import {
+  backfillSemanticIndex,
+  indexSenderMessagesForSemanticSearch,
+  semanticSearchEnabled,
+} from "./semantic-search";
 import type { Env } from "./types";
 
 const api = new Hono<{ Bindings: Env }>();
@@ -258,12 +263,41 @@ api.get("/api/search", async (c) => {
   const q = c.req.query("q");
   const limit = parseBoundedInt(c.req.query("limit"), 20, 1, 50);
   const includeArchived = c.req.query("include_archived") === "true";
+  const modeValue = c.req.query("mode");
+  const mode = parseSearchMode(modeValue);
 
   if (!q) return c.json({ error: "Missing query parameter 'q'" }, 400);
+  if (modeValue && !mode) {
+    return c.json({ error: "Invalid mode. Use keyword, vector, or hybrid." }, 400);
+  }
 
   const db = getDb(c.env.DB);
-  const messages = await searchMessages(db, q, limit, includeArchived);
+  const messages = await searchMessages(
+    db,
+    c.env,
+    q,
+    limit,
+    includeArchived,
+    mode ?? "hybrid"
+  );
   return c.json(messages);
+});
+
+// Backfill semantic index for existing approved messages
+api.post("/api/search/reindex", async (c) => {
+  const limit = parseBoundedInt(c.req.query("limit"), 100, 1, 500);
+  const offset = parseBoundedInt(c.req.query("offset"), 0, 0, MAX_OFFSET);
+  const includeArchived = c.req.query("include_archived") === "true";
+  const db = getDb(c.env.DB);
+
+  const result = await backfillSemanticIndex(c.env, db, limit, offset, includeArchived);
+  return c.json({
+    ...result,
+    limit,
+    offset,
+    include_archived: includeArchived,
+    semantic_search_enabled: semanticSearchEnabled(c.env),
+  });
 });
 
 // --- Threads ---
@@ -466,9 +500,12 @@ api.post("/api/approved-senders", async (c) => {
     .where("approved", "=", 0)
     .execute();
 
+  const indexed = await indexSenderMessagesForSemanticSearch(c.env, db, normalized);
+
   return c.json({
     email: normalized,
     approved_count: Number(result[0]?.numUpdatedRows ?? 0),
+    indexed_count: indexed,
   });
 });
 

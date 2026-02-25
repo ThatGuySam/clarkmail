@@ -40,6 +40,17 @@ name = "EMAIL"
 # Option B: Resend
 # Set RESEND_API_KEY as a secret (see below)
 
+# --- Semantic Search (optional) ---
+# 1) Create a Vectorize index:
+#    wrangler vectorize create clawpost-message-vectors --dimensions=768 --metric=cosine
+# 2) Bind Vectorize + Workers AI
+[[vectorize]]
+binding = "MESSAGE_VECTORS"
+index_name = "clawpost-message-vectors"
+
+[ai]
+binding = "AI"
+
 # --- Environment Variables ---
 [vars]
 FROM_EMAIL = "clark@samcarlton.com"
@@ -49,6 +60,8 @@ INBOUND_AUTO_APPROVE_ALL = "true"
 INBOUND_REQUIRE_AUTH_PASS = "true"
 MAX_INBOUND_BYTES = "10485760"      # 10 MiB
 MAX_ATTACHMENT_BYTES = "5242880"    # 5 MiB
+VECTOR_EMBEDDING_MODEL = "@cf/google/embeddinggemma-300m"
+VECTORIZE_NAMESPACE = "messages"
 # REPLY_TO_EMAIL = "reply@yourdomain.com"  # optional — omit to reply to FROM_EMAIL
 # EMAIL_PROVIDER = "cloudflare"  # or "resend" — auto-detected if omitted
 

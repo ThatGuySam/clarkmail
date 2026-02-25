@@ -13,6 +13,11 @@ import {
   sendDraft,
   deleteDraft,
 } from "./drafts";
+import {
+  backfillSemanticIndex,
+  indexSenderMessagesForSemanticSearch,
+  semanticSearchEnabled,
+} from "./semantic-search";
 import type { Env } from "./types";
 
 const MAX_LIST_LIMIT = 100;
@@ -306,23 +311,75 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
     this.server.registerTool(
       "search_messages",
       {
-        description: "Search approved messages by subject or body text (full-text search)",
+        description: "Search approved messages by subject/body using keyword, vector, or hybrid retrieval",
         inputSchema: {
           query: z.string().describe("Search query"),
           limit: z.number().int().min(1).max(50).optional().default(20).describe("Max results"),
           include_archived: z.boolean().optional().default(false).describe("Include archived messages"),
+          mode: z.enum(["keyword", "vector", "hybrid"]).optional().default("hybrid")
+            .describe("Search mode (hybrid is recommended)"),
         },
       },
-      async ({ query, limit, include_archived }) => {
+      async ({ query, limit, include_archived, mode }) => {
         const db = getDb(this.env.DB);
         const safeLimit = clampNumber(limit, 20, 1, 50);
-        const messages = await searchMessages(db, query, safeLimit, include_archived ?? false);
+        const messages = await searchMessages(
+          db,
+          this.env,
+          query,
+          safeLimit,
+          include_archived ?? false,
+          mode ?? "hybrid"
+        );
 
         return {
           content: [
             {
               type: "text" as const,
               text: JSON.stringify(messages, null, 2),
+            },
+          ],
+        };
+      }
+    );
+
+    // reindex_semantic_search
+    this.server.registerTool(
+      "reindex_semantic_search",
+      {
+        description: "Backfill semantic index vectors for existing approved messages",
+        inputSchema: {
+          limit: z.number().int().min(1).max(500).optional().default(100)
+            .describe("Max messages to process"),
+          offset: z.number().int().min(0).max(MAX_OFFSET).optional().default(0)
+            .describe("Offset for pagination"),
+          include_archived: z.boolean().optional().default(false)
+            .describe("Include archived approved messages"),
+        },
+      },
+      async ({ limit, offset, include_archived }) => {
+        const db = getDb(this.env.DB);
+        const safeLimit = clampNumber(limit, 100, 1, 500);
+        const safeOffset = clampNumber(offset, 0, 0, MAX_OFFSET);
+        const result = await backfillSemanticIndex(
+          this.env,
+          db,
+          safeLimit,
+          safeOffset,
+          include_archived ?? false
+        );
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                ...result,
+                limit: safeLimit,
+                offset: safeOffset,
+                include_archived: include_archived ?? false,
+                semantic_search_enabled: semanticSearchEnabled(this.env),
+              }, null, 2),
             },
           ],
         };
@@ -725,11 +782,15 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
           .execute();
 
         const count = Number(result[0]?.numUpdatedRows ?? 0);
+        const indexed = await indexSenderMessagesForSemanticSearch(this.env, db, normalized);
         return {
           content: [
             {
               type: "text" as const,
-              text: `Approved sender: ${normalized}\nRetroactively approved ${count} message(s)`,
+              text:
+                `Approved sender: ${normalized}\n` +
+                `Retroactively approved ${count} message(s)\n` +
+                `Indexed ${indexed} message embedding(s)`,
             },
           ],
         };

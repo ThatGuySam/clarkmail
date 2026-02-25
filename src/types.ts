@@ -48,6 +48,10 @@ export interface Env {
   DB: D1Database;
   ATTACHMENTS: R2Bucket;
   MCP_OBJECT: DurableObjectNamespace;
+  /** Workers AI binding (for semantic embeddings) */
+  AI?: Ai;
+  /** Vectorize index binding for semantic message search */
+  MESSAGE_VECTORS?: Vectorize;
   API_KEY: string;
   /** Cloudflare Email Service binding (send_email in wrangler config) */
   EMAIL?: EmailBinding;
@@ -72,6 +76,10 @@ export interface Env {
   MAX_INBOUND_BYTES?: string;
   /** Max single attachment size in bytes (defaults to 5 MiB) */
   MAX_ATTACHMENT_BYTES?: string;
+  /** Workers AI embedding model slug (defaults to @cf/google/embeddinggemma-300m) */
+  VECTOR_EMBEDDING_MODEL?: string;
+  /** Vectorize namespace to store message vectors in (defaults to "messages") */
+  VECTORIZE_NAMESPACE?: string;
   WEBHOOK_URL?: string;
   WEBHOOK_SECRET?: string;
   RESEND_WEBHOOK_SECRET?: string;

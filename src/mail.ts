@@ -1,6 +1,7 @@
 import { sql, type Kysely } from "kysely";
 import type { Database } from "./db/schema";
 import { Resend } from "resend";
+import { indexMessageForSemanticSearch } from "./semantic-search";
 import type { Env, EmailServiceAttachment } from "./types";
 
 interface AttachmentInput {
@@ -307,6 +308,23 @@ export async function sendEmail(
     })
     .execute();
 
+  try {
+    await indexMessageForSemanticSearch(env, {
+      id: dbId,
+      thread_id: threadId,
+      from: sender.fromEmail,
+      to: toStr,
+      subject: params.subject,
+      body_text: params.body,
+      direction: "outbound",
+      approved: 1,
+      archived: 0,
+      created_at: now,
+    });
+  } catch (error) {
+    console.warn("Failed to index outbound message embedding", { messageId: dbId, error });
+  }
+
   // Store outbound attachments in R2
   if (resolved.length > 0) {
     for (const att of resolved) {
@@ -419,6 +437,23 @@ export async function replyToMessage(
       created_at: now,
     })
     .execute();
+
+  try {
+    await indexMessageForSemanticSearch(env, {
+      id: dbId,
+      thread_id: original.thread_id,
+      from: sender.fromEmail,
+      to: replyTo,
+      subject,
+      body_text: body,
+      direction: "outbound",
+      approved: 1,
+      archived: 0,
+      created_at: now,
+    });
+  } catch (error) {
+    console.warn("Failed to index outbound reply embedding", { messageId: dbId, error });
+  }
 
   // Store outbound attachments in R2
   if (resolved.length > 0) {

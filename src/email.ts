@@ -2,6 +2,7 @@ import PostalMime from "postal-mime";
 import { sql } from "kysely";
 import { getDb } from "./db/client";
 import { dispatchWebhook } from "./webhooks";
+import { indexMessageForSemanticSearch } from "./semantic-search";
 import type { Env } from "./types";
 
 const DEFAULT_MAX_INBOUND_BYTES = 10 * 1024 * 1024; // 10 MiB
@@ -200,6 +201,25 @@ export async function handleInboundEmail(
       created_at: now,
     })
     .execute();
+
+  if (approved === 1) {
+    ctx.waitUntil(
+      indexMessageForSemanticSearch(env, {
+        id: msgId,
+        thread_id: threadId,
+        from,
+        to,
+        subject,
+        body_text: parsed.text ?? null,
+        direction: "inbound",
+        approved,
+        archived: 0,
+        created_at: now,
+      }).catch((error) => {
+        console.warn("Failed to index inbound message embedding", { messageId: msgId, error });
+      })
+    );
+  }
 
   // Store attachments in R2
   if (parsed.attachments?.length) {

@@ -5,3 +5,7 @@ API_KEY=your-api-key-here
 # RESEND_WEBHOOK_SIGNING_SECRET=whsec_your_signing_secret_here
 # Legacy fallback token mode for /webhooks/resend?token=...:
 # RESEND_WEBHOOK_SECRET=your-random-webhook-token
+
+# Semantic search (optional; requires [ai] + [[vectorize]] in wrangler.toml):
+# VECTOR_EMBEDDING_MODEL=@cf/google/embeddinggemma-300m
+# VECTORIZE_NAMESPACE=messages
