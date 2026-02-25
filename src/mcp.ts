@@ -312,7 +312,7 @@ export class EmailMCP extends McpAgent<Env, {}, {}> {
       "search_messages",
       {
         description:
-          "Search approved messages by subject/body using keyword, vector, or hybrid retrieval (hybrid returns lexical matches first, then semantic matches)",
+          "Search approved messages by subject/body using keyword, vector, or hybrid retrieval (hybrid returns lexical matches first, then semantic matches with chunk snippets)",
         inputSchema: {
           query: z.string().describe("Search query"),
           limit: z.number().int().min(1).max(50).optional().default(20).describe("Max results"),

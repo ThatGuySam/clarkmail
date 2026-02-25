@@ -17,6 +17,13 @@ const MAX_ATTACHMENT_BYTES = 512 * 1024;
 const MAX_SUBJECT_CHARS = 220;
 const MAX_ADDRESS_CHARS = 140;
 const MAX_ATTACHMENT_NAME_CHARS = 120;
+const MAX_SEMANTIC_CHUNK_CHARS = 780;
+const SEMANTIC_CHUNK_OVERLAP_CHARS = 120;
+const MAX_SEMANTIC_CHUNKS_PER_MESSAGE = 10;
+const MAX_SEMANTIC_MATCH_CHUNKS = 3;
+const MAX_SEMANTIC_CHUNK_METADATA_CHARS = 480;
+const SEMANTIC_SCHEMA_VERSION = "chunk-v1";
+const CHUNK_ID_SEPARATOR = "::chunk::";
 
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "txt",
@@ -79,6 +86,14 @@ export const SEMANTIC_MESSAGE_COLUMNS = [
 export interface SemanticMatch {
   id: string;
   score: number;
+  chunks: SemanticMatchedChunk[];
+}
+
+export interface SemanticMatchedChunk {
+  vector_id: string;
+  score: number;
+  chunk_index: number | null;
+  text: string;
 }
 
 interface EmbeddingOutput {
@@ -305,6 +320,65 @@ function buildIndexDocument(message: SearchableMessage, attachmentText: string):
   return truncate(parts.join("\n"), MAX_DOCUMENT_CHARS);
 }
 
+function buildChunkVectorId(messageId: string, chunkIndex: number): string {
+  return `${messageId}${CHUNK_ID_SEPARATOR}${chunkIndex}`;
+}
+
+function parseChunkMessageId(vectorId: string): string {
+  const index = vectorId.indexOf(CHUNK_ID_SEPARATOR);
+  if (index < 0) return vectorId;
+  return vectorId.slice(0, index);
+}
+
+function parseChunkIndex(vectorId: string): number | null {
+  const index = vectorId.indexOf(CHUNK_ID_SEPARATOR);
+  if (index < 0) return null;
+  const raw = Number.parseInt(vectorId.slice(index + CHUNK_ID_SEPARATOR.length), 10);
+  return Number.isInteger(raw) && raw >= 0 ? raw : null;
+}
+
+function splitDocumentIntoSemanticChunks(document: string): string[] {
+  const normalized = clean(document, MAX_DOCUMENT_CHARS);
+  if (!normalized) return [];
+  if (normalized.length <= MAX_SEMANTIC_CHUNK_CHARS) {
+    return [normalized];
+  }
+
+  const chunks: string[] = [];
+  let start = 0;
+
+  while (start < normalized.length && chunks.length < MAX_SEMANTIC_CHUNKS_PER_MESSAGE) {
+    const hardEnd = Math.min(start + MAX_SEMANTIC_CHUNK_CHARS, normalized.length);
+    let chunkEnd = hardEnd;
+
+    if (hardEnd < normalized.length) {
+      const whitespaceBoundary = normalized.lastIndexOf(" ", hardEnd);
+      if (whitespaceBoundary > start + 60) {
+        chunkEnd = whitespaceBoundary;
+      }
+    }
+
+    const chunk = clean(normalized.slice(start, chunkEnd), MAX_SEMANTIC_CHUNK_CHARS);
+    if (chunk) chunks.push(chunk);
+    if (chunkEnd >= normalized.length) break;
+
+    start = Math.max(chunkEnd - SEMANTIC_CHUNK_OVERLAP_CHARS, start + 1);
+  }
+
+  return chunks;
+}
+
+export async function buildSemanticChunksForMessage(
+  env: Env,
+  db: Kysely<Database>,
+  message: SearchableMessage
+): Promise<string[]> {
+  const attachmentText = await collectMessageAttachmentText(env, db, message.id);
+  const document = buildIndexDocument(message, attachmentText);
+  if (!document) return [];
+  return splitDocumentIntoSemanticChunks(document);
+}
+
 async function embedText(env: Env, text: string): Promise<number[] | null> {
   if (!semanticSearchEnabled(env)) return null;
 
@@ -342,27 +416,42 @@ export async function indexMessageForSemanticSearch(
   if (message.approved !== 1) return false;
 
   const queryDb = db ?? getDb(env.DB);
-  const attachmentText = await collectMessageAttachmentText(env, queryDb, message.id);
-  const document = buildIndexDocument(message, attachmentText);
-  if (!document) return false;
+  const chunks = await buildSemanticChunksForMessage(env, queryDb, message);
+  if (chunks.length === 0) return false;
 
-  const embedding = await embedText(env, document);
-  if (!embedding) return false;
+  const vectors: VectorizeVector[] = [];
+  for (const [chunkIndex, chunkText] of chunks.entries()) {
+    const embedding = await embedText(env, chunkText);
+    if (!embedding) continue;
 
-  await env.MESSAGE_VECTORS.upsert([
-    {
-      id: message.id,
+    vectors.push({
+      id: buildChunkVectorId(message.id, chunkIndex),
       namespace: getNamespace(env),
       values: embedding,
       metadata: {
+        semantic_schema: SEMANTIC_SCHEMA_VERSION,
+        message_id: message.id,
+        chunk_index: chunkIndex,
+        chunk_text: clean(chunkText, MAX_SEMANTIC_CHUNK_METADATA_CHARS),
         thread_id: message.thread_id,
         direction: message.direction,
         created_at: message.created_at,
         from: clean(message.from, MAX_ADDRESS_CHARS),
         subject: clean(message.subject, MAX_SUBJECT_CHARS),
       },
-    },
-  ]);
+    });
+  }
+
+  if (vectors.length === 0) return false;
+  await env.MESSAGE_VECTORS.upsert(vectors);
+
+  // Cleanup legacy one-vector-per-message entries so hybrid/vector queries
+  // prioritize chunk records with snippet metadata.
+  try {
+    await env.MESSAGE_VECTORS.deleteByIds([message.id]);
+  } catch {
+    // Ignore deletion failures; chunk vectors were already upserted.
+  }
 
   return true;
 }
@@ -384,12 +473,84 @@ export async function querySemanticMatches(
     topK,
     namespace: getNamespace(env),
     returnValues: false,
+    returnMetadata: "all",
+  });
+
+  const grouped = new Map<string, SemanticMatch>();
+
+  for (const match of matches.matches) {
+    if (!Number.isFinite(match.score)) continue;
+
+    const metadata = (match.metadata ?? {}) as Record<string, unknown>;
+    const metadataMessageId = metadata.message_id;
+    const messageId =
+      typeof metadataMessageId === "string" && metadataMessageId.length > 0
+        ? metadataMessageId
+        : parseChunkMessageId(match.id);
+    if (!messageId) continue;
+
+    const metadataChunkIndex = metadata.chunk_index;
+    const chunkIndex =
+      typeof metadataChunkIndex === "number" && Number.isInteger(metadataChunkIndex)
+        ? metadataChunkIndex
+        : parseChunkIndex(match.id);
+
+    const metadataChunkText = metadata.chunk_text;
+    const chunkText =
+      typeof metadataChunkText === "string"
+        ? clean(metadataChunkText, MAX_SEMANTIC_CHUNK_METADATA_CHARS)
+        : "";
+
+    let result = grouped.get(messageId);
+    if (!result) {
+      result = { id: messageId, score: match.score, chunks: [] };
+      grouped.set(messageId, result);
+    } else if (match.score > result.score) {
+      result.score = match.score;
+    }
+
+    if (!chunkText) continue;
+    if (result.chunks.some((chunk) => chunk.vector_id === match.id)) continue;
+
+    result.chunks.push({
+      vector_id: match.id,
+      score: match.score,
+      chunk_index: chunkIndex,
+      text: chunkText,
+    });
+  }
+
+  const chunkMatches = [...grouped.values()]
+    .map((match) => ({
+      ...match,
+      chunks: match.chunks
+        .sort((a, b) => b.score - a.score)
+        .slice(0, MAX_SEMANTIC_MATCH_CHUNKS),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  if (chunkMatches.length > 0) return chunkMatches;
+
+  // Backward-compatibility: if vectors were indexed before chunk metadata schema,
+  // still return semantic ids/scores until reindexing populates chunk snippets.
+  const legacyMatches = await env.MESSAGE_VECTORS.query(embedding, {
+    topK,
+    namespace: getNamespace(env),
+    returnValues: false,
     returnMetadata: "none",
   });
 
-  return matches.matches
-    .filter((match) => Number.isFinite(match.score))
-    .map((match) => ({ id: match.id, score: match.score }));
+  const byMessageId = new Map<string, SemanticMatch>();
+  for (const match of legacyMatches.matches) {
+    if (!Number.isFinite(match.score)) continue;
+    const messageId = parseChunkMessageId(match.id);
+    const existing = byMessageId.get(messageId);
+    if (!existing || match.score > existing.score) {
+      byMessageId.set(messageId, { id: messageId, score: match.score, chunks: [] });
+    }
+  }
+
+  return [...byMessageId.values()].sort((a, b) => b.score - a.score);
 }
 
 export async function backfillSemanticIndex(
