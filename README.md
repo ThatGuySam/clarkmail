@@ -57,7 +57,7 @@ Use the Streamable HTTP transport with your worker URL and Bearer token auth. Ex
 | `list_messages` | List messages (filter by direction, sender, label; excludes archived by default) |
 | `read_message` | Read a message with attachment metadata and labels |
 | `get_attachment` | Download attachment content (base64) |
-| `search_messages` | Search by `mode=keyword|vector|hybrid` (hybrid = lexical matches first, then semantic matches, including text-like attachments) |
+| `search_messages` | Search by `mode=keyword|vector|hybrid` (hybrid = lexical matches first, then semantic matches, including matched chunk snippets from text-like attachments) |
 | `reindex_semantic_search` | Backfill vectors for existing approved messages |
 | `list_threads` | List conversation threads |
 
@@ -108,7 +108,7 @@ Status:   Resend webhook → /webhooks/resend → D1 status update
 - **D1** stores messages, threads, drafts, labels, and attachment metadata
 - **R2** stores attachment blobs (D1 has a 1 MiB row limit)
 - **FTS5** virtual table provides lexical search with automatic sync via triggers
-- **Workers AI + Vectorize** (optional) adds semantic vector retrieval with hybrid ranking, including text-like attachments (`.txt`, `.md`, `.json`, `.eml`, `message/rfc822`, etc.)
+- **Workers AI + Vectorize** (optional) adds semantic vector retrieval with hybrid ranking, including text-like attachments (`.txt`, `.md`, `.json`, `.eml`, `message/rfc822`, etc.) and returns top matching semantic chunks in results
 - **McpAgent** Durable Object serves the MCP endpoint at `/mcp` (Streamable HTTP)
 - **Hono** serves a REST API at `/api/*` for direct HTTP access
 
@@ -253,7 +253,7 @@ All `/api/*` routes require `X-API-Key` header. The `/webhooks/*` routes are una
 | `POST` | `/api/messages/:id/archive` | Archive a message |
 | `POST` | `/api/messages/:id/unarchive` | Unarchive a message |
 | `GET` | `/api/attachments/:id` | Download attachment (approved messages only) |
-| `GET` | `/api/search` | Search (`?q=&limit=&include_archived=&mode=keyword|vector|hybrid`; `include_archived` defaults to `true`) |
+| `GET` | `/api/search` | Search (`?q=&limit=&include_archived=&mode=keyword|vector|hybrid`; `include_archived` defaults to `true`). Vector/hybrid responses include `semantic_score` and `semantic_matches` chunk snippets when available |
 | `POST` | `/api/search/reindex` | Backfill semantic vectors (`?limit=&offset=&include_archived=`) |
 | `GET` | `/api/threads` | List threads (`?limit=&offset=`) |
 | `GET` | `/api/threads/:id` | Thread with all approved messages |
@@ -268,6 +268,61 @@ All `/api/*` routes require `X-API-Key` header. The `/webhooks/*` routes are una
 | `DELETE` | `/api/approved-senders/:email` | Remove approved sender |
 | `GET` | `/api/approved-senders` | List approved senders |
 | `POST` | `/webhooks/resend` | Resend delivery status webhook (Svix signature, with `?token=` fallback) |
+
+### Semantic Chunk Matches
+
+For `mode=vector` and `mode=hybrid`, search results may include:
+
+- `semantic_score`: best semantic similarity score for that message
+- `semantic_matches`: top matching embedded chunks (already-snipped text) so LLMs can use retrieved context directly without refetching full emails
+
+If your vectors were indexed before chunk snippets were introduced, run `POST /api/search/reindex` once to populate chunk matches for older messages.
+
+Example:
+
+```json
+[
+  {
+    "id": "msg_123",
+    "subject": "Planning meeting notes",
+    "semantic_score": 0.82,
+    "semantic_matches": [
+      {
+        "vector_id": "msg_123::chunk::1",
+        "score": 0.82,
+        "chunk_index": 1,
+        "text": "Action items: finalize agenda by Thursday, include Q2 hiring plan..."
+      }
+    ]
+  }
+]
+```
+
+## Local Proxy for LLM Containers
+
+Run a tiny local proxy that forwards `/api/*` to your deployed Worker while injecting `X-API-Key` from local env vars.
+This lets Docker/LLM tools call a local URL without seeing your real API key.
+
+```bash
+cp proxy/.env.example proxy/.env
+# edit proxy/.env with your values
+set -a; source proxy/.env; set +a
+bun run proxy:dev
+```
+
+Default local URL: `http://127.0.0.1:8788`
+
+- Health: `GET /health`
+- OpenAPI spec for OpenClaw: `GET /openapi.yaml`
+- Proxied API: `http://127.0.0.1:8788/api/*`
+
+Example search through local proxy:
+
+```bash
+curl -sS -G "http://127.0.0.1:8788/api/search" \
+  --data-urlencode "q=planning meeting" \
+  --data-urlencode "mode=hybrid"
+```
 
 ## Future Improvements
 
