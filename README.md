@@ -302,11 +302,11 @@ Example:
 
 Run a tiny local proxy that forwards `/api/*` to your deployed Worker while injecting `X-API-Key` from local env vars.
 This lets Docker/LLM tools call a local URL without seeing your real API key.
+The proxy uses T3 Env for runtime validation and automatically loads `proxy/.env`.
 
 ```bash
 cp proxy/.env.example proxy/.env
 # edit proxy/.env with your values
-set -a; source proxy/.env; set +a
 bun run proxy:dev
 ```
 
